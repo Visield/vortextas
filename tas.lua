@@ -1,4 +1,5 @@
-                                    
+--[[
+
   ▄▓▄▄    ▄    ▄▓▄▄         ▄▄▄▄    
 ▄▀▀███▓  ░░▓▄ ▀▀███▓     ▄▀▀▀▀█▓█▄▄▀
   ░░███▌ ░▐█▓▒ ░░███▌   ▓▄▄   ░▀▓▀  
@@ -8,7 +9,7 @@
      ▓▓▓▀         ▓▌ ▐▓▄   ▄▒▒▒█    
     ▀▀           ▀    ▀█▓▓▓▒▒▀▀     
 
---hi
+hi ]]
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -25,67 +26,6 @@ local keybinds = {
 
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
-
-local function findScene(char)
-	for _, child in ipairs(char:GetChildren() or {}) do
-		local ok, scene = pcall(function()
-			return child.Scene
-		end)
-
-		if ok and scene then
-			return scene
-		end
-	end
-end
-
-local function getCharacterParts(char)
-	local parts = {
-		char = char,
-		humanoid = char:FindFirstChild("Humanoid"),
-		hrp = char:FindFirstChild("HumanoidRootPart")
-	}
-
-	local torso = findScene(char)
-	torso = torso and torso:FindFirstChild("Armature.001")
-	torso = torso and torso:FindFirstChild("HumanoidRootPart")
-	torso = torso and torso:FindFirstChild("Torso")
-
-	if not torso then
-		return parts
-	end
-
-	parts.torso = torso
-	parts.head = torso:FindFirstChild("Head")
-	parts.rightArm = torso:FindFirstChild("Right Arm")
-	parts.leftArm = torso:FindFirstChild("Left Arm")
-	parts.rightLeg = torso:FindFirstChild("Right Leg")
-	parts.leftLeg = torso:FindFirstChild("Left Leg")
-
-	return parts
-end
-
-local function waitForFull(char)
-	local scene
-
-	repeat
-		scene = findScene(char)
-		task.wait()
-	until scene
-
-	findScene(char)
-		:WaitForChild("Armature.001")
-		:WaitForChild("HumanoidRootPart")
-		:WaitForChild("Torso")
-		:WaitForChild("Head")
-end
-
-waitForFull(character)
-
-local limbs = getCharacterParts(character)
-
-if not limbs.torso or not limbs.hrp then
-	return
-end
 
 local checkpoints = {}
 local frames = {}
@@ -114,6 +54,18 @@ local function copyCFrame(cf)
 	end)
 
 	return ok and result or nil
+end
+
+local function copyVelocity(velocity)
+	if not velocity then
+		return nil
+	end
+
+	local ok, result = pcall(function()
+		return velocity * 1
+	end)
+
+	return ok and result or velocity
 end
 
 local function lerpCFrame(a, b, alpha)
@@ -185,7 +137,7 @@ local function createCheckpointMarker(characterCFrame)
 end
 
 local function clearCheckpointMarkers()
-	for _, checkpoint in ipairs(checkpoints or {}) do
+	for _, checkpoint in ipairs(checkpoints) do
 		if checkpoint and checkpoint.marker then
 			pcall(function()
 				checkpoint.marker:Destroy()
@@ -260,10 +212,19 @@ local function createCheckpoint()
 		return
 	end
 
+	local okVelocity, velocity = pcall(function()
+		return copyVelocity(character.Velocity)
+	end)
+
+	if not okVelocity then
+		velocity = nil
+	end
+
 	checkpoints[#checkpoints + 1] = {
 		frameIndex = #frames,
 		time = recordingTime,
 		character = characterCFrame,
+		velocity = velocity,
 		marker = createCheckpointMarker(characterCFrame)
 	}
 end
@@ -284,6 +245,12 @@ local function returnToCheckpoint()
 	recordingTime = checkpoint.time
 	replayTime = 0
 	replayIndex = 1
+
+	if checkpoint.velocity then
+		pcall(function()
+			character.Velocity = copyVelocity(checkpoint.velocity)
+		end)
+	end
 end
 
 local function deleteCheckpoint()
@@ -368,6 +335,7 @@ local function updateReplay(dt)
 		replayTime = frames[#frames].time
 		setReplayCharacter(frames[#frames].character)
 		replaying = false
+
 		return nil
 	end
 
@@ -400,12 +368,16 @@ UIS.InputBegan:Connect(function(input, gameProcessed)
 		else
 			startRecording()
 		end
+
 	elseif input.KeyCode == keybinds.checkpoint then
 		createCheckpoint()
+
 	elseif input.KeyCode == keybinds.returntocheckpoint then
 		returnToCheckpoint()
+
 	elseif input.KeyCode == keybinds.deletecheckpoint then
 		deleteCheckpoint()
+
 	elseif input.KeyCode == keybinds.replay then
 		if replaying then
 			replaying = false
@@ -414,3 +386,5 @@ UIS.InputBegan:Connect(function(input, gameProcessed)
 		end
 	end
 end)
+
+print("yep yep good to go")
