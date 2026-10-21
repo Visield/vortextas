@@ -1,390 +1,549 @@
---[[
+--bye bye vis text art comment
 
-  ▄▓▄▄    ▄    ▄▓▄▄         ▄▄▄▄    
-▄▀▀███▓  ░░▓▄ ▀▀███▓     ▄▀▀▀▀█▓█▄▄▀
-  ░░███▌ ░▐█▓▒ ░░███▌   ▓▄▄   ░▀▓▀  
-   ░▐██▌  ██▓   ░▐██▌  ░░▀██▓▄      
-    ░░░░▄░░░     ░░░▌    ░░█▀█▓▄    
-    ░▒▒▒▒▒▀      ░▒▒  ▄▀   ░░░░░▌   
-     ▓▓▓▀         ▓▌ ▐▓▄   ▄▒▒▒█    
-    ▀▀           ▀    ▀█▓▓▓▒▒▀▀     
-
-hi ]]
-
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local player = game:GetService("Players").LocalPlayer
+local character = player.Character
 
 local keybinds = {
-	togglerecord = Enum.KeyCode.P,
-	replay = Enum.KeyCode.L,
-	checkpoint = Enum.KeyCode.F,
-	returntocheckpoint = Enum.KeyCode.R,
-	deletecheckpoint = Enum.KeyCode.V
+    togglerecord = Enum.KeyCode.P,
+    replay = Enum.KeyCode.L,
+    checkpoint = Enum.KeyCode.F,
+    returntocheckpoint = Enum.KeyCode.R,
+    deletecheckpoint = Enum.KeyCode.V,
+    pause = Enum.KeyCode.E,
 }
 
-local player = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
+local SETTINGS = {
+    VelocitySamples = 3,
+    NativeTestFrames = 3,
+    MovementThreshold = 0.015,
+    MaxDeltaTime = 0.1,
+}
 
 local checkpoints = {}
 local frames = {}
 
 local recording = false
 local replaying = false
+local paused = false
+local pausedState = nil
 
 local recordingTime = 0
 local replayTime = 0
 local replayIndex = 1
 
-local function copyCFrame(cf)
-	if not cf then
-		return nil
-	end
+local previousPosition = nil
+local velocitySamples = {}
+local estimatedVelocity = Vector3.zero
+local savedVelocity = Vector3.zero
 
-	local ok, result = pcall(function()
-		local position = cf.Position
-		local rotation = cf.Rotation
+local resumeTesting = false
+local resumeFrames = 0
+local resumeStartPosition = nil
+local syntheticMovement = false
 
-		if not position or not rotation then
-			return nil
-		end
+local pauseCFrame = nil
 
-		return CFrame.new(position) * rotation
-	end)
+local function getCFrame()
+    local ok, cf = pcall(function()
+        return character:GetPivot()
+    end)
 
-	return ok and result or nil
+    if ok then
+        return cf
+    end
+
+    return nil
 end
 
-local function copyVelocity(velocity)
-	if not velocity then
-		return nil
-	end
+local function getPosition()
+    local cf = getCFrame()
 
-	local ok, result = pcall(function()
-		return velocity * 1
-	end)
+    if cf then
+        return cf.Position
+    end
 
-	return ok and result or velocity
+    local ok, position = pcall(function()
+        return character.Position
+    end)
+
+    if ok then
+        return position
+    end
+
+    return nil
 end
 
-local function lerpCFrame(a, b, alpha)
-	if not a then
-		return b
-	end
+local function setCFrame(cf)
+    if not cf then
+        return false
+    end
 
-	if not b then
-		return a
-	end
+    local ok = pcall(function()
+        character:PivotTo(cf)
+    end)
 
-	alpha = math.max(0, math.min(1, alpha))
+    if ok then
+        return true
+    end
 
-	local ok, result = pcall(function()
-		return a:Lerp(b, alpha)
-	end)
+    ok = pcall(function()
+        character.Position = cf.Position
+        character.Orientation = cf:ToOrientation()
+    end)
 
-	if ok and result then
-		return result
-	end
-
-	return a
+    return ok
 end
 
-local function setReplayCharacter(cf)
-	if not cf then
-		return
-	end
-
-	local ok = pcall(function()
-		local rx, ry, rz = cf:ToOrientation()
-
-		character.Position = cf.Position
-		character.Orientation = Vector3.new(
-			math.deg(rx),
-			math.deg(ry),
-			math.deg(rz)
-		)
-	end)
-
-	if not ok then
-		pcall(function()
-			character:PivotTo(cf)
-		end)
-	end
+local function setVelocity(velocity)
+    return pcall(function()
+        character.Velocity = velocity
+    end)
 end
 
-local function createCheckpointMarker(characterCFrame)
-	local marker = Instance.new("Part")
-
-	marker.Name = "checkpoint"
-	marker.Size = Vector3.new(0.35, 0.35, 0.35)
-	marker.Anchored = true
-	marker.CanCollide = false
-	marker.Transparency = 0.5
-	marker.Color = Color3.new(0, 0, 0)
-	marker.CFrame = characterCFrame * CFrame.new(0, 2, 0)
-	marker.Parent = Workspace
-
-	pcall(function()
-		marker.CanTouch = false
-	end)
-
-	pcall(function()
-		marker.CanQuery = false
-	end)
-
-	return marker
+local function zeroVelocity()
+    setVelocity(Vector3.zero)
 end
 
-local function clearCheckpointMarkers()
-	for _, checkpoint in ipairs(checkpoints) do
-		if checkpoint and checkpoint.marker then
-			pcall(function()
-				checkpoint.marker:Destroy()
-			end)
-
-			checkpoint.marker = nil
-		end
-	end
+local function resetVelocitySamples(position, initialVelocity)
+    previousPosition = position
+    velocitySamples = {}
+    estimatedVelocity = initialVelocity or Vector3.zero
 end
 
-local function captureFrame()
-	local ok, pivot = pcall(function()
-		return character:GetPivot()
-	end)
+local function addVelocitySample(velocity)
+    table.insert(velocitySamples, velocity)
 
-	if not ok then
-		return nil
-	end
+    while #velocitySamples > SETTINGS.VelocitySamples do
+        table.remove(velocitySamples, 1)
+    end
 
-	local characterCFrame = copyCFrame(pivot)
+    local total = Vector3.zero
 
-	if not characterCFrame then
-		return nil
-	end
+    for _, sample in ipairs(velocitySamples) do
+        total = total + sample
+    end
 
-	frames[#frames + 1] = {
-		time = recordingTime,
-		character = characterCFrame
-	}
+    estimatedVelocity = total / #velocitySamples
+end
 
-	return frames[#frames]
+local function getCharacterState()
+    return {
+        character = getCFrame(),
+        velocity = estimatedVelocity,
+    }
+end
+
+local function setCharacterState(state)
+    if not state or not state.character then
+        return
+    end
+
+    setCFrame(state.character)
+
+    savedVelocity = state.velocity or Vector3.zero
+    estimatedVelocity = savedVelocity
+
+    setVelocity(savedVelocity)
+    resetVelocitySamples(getPosition(), savedVelocity)
+end
+
+
+local function createMarker(cf)
+    local marker = Instance.new("Part")
+
+    marker.Name = "TASCheckpoint"
+    marker.Shape = Enum.PartType.Ball
+    marker.Size = Vector3.new(0.5, 0.5, 0.5)
+    marker.Anchored = true
+    marker.CanCollide = false
+    marker.CanTouch = false
+    marker.CanQuery = false
+    marker.Transparency = replaying and 1 or 0.35
+    marker.Position = cf.Position
+    marker.Parent = Workspace
+
+    return marker
+end
+
+local function updateMarkerVisibility(hidden)
+    for _, checkpoint in ipairs(checkpoints) do
+        if checkpoint.marker then
+            checkpoint.marker.Transparency = hidden and 1 or 0.35
+        end
+    end
+end
+
+local function deleteCheckpoint(index)
+    local checkpoint = checkpoints[index]
+
+    if checkpoint then
+        if checkpoint.marker then
+            checkpoint.marker:Destroy()
+        end
+
+        table.remove(checkpoints, index)
+    end
 end
 
 local function startRecording()
-	clearCheckpointMarkers()
-	table.clear(checkpoints)
-	table.clear(frames)
+    frames = {}
+    recordingTime = 0
+    replayTime = 0
+    replayIndex = 1
 
-	recording = true
-	replaying = false
+    recording = true
+    replaying = false
+    syntheticMovement = false
+    resumeTesting = false
 
-	recordingTime = 0
-	replayTime = 0
-	replayIndex = 1
+    local cf = getCFrame()
+    local position = getPosition()
 
-	captureFrame()
+    if cf then
+        table.insert(frames, {
+            time = 0,
+            character = cf,
+            velocity = estimatedVelocity,
+        })
+    end
+
+    resetVelocitySamples(position, estimatedVelocity)
 end
 
 local function stopRecording()
-	recording = false
-
-	clearCheckpointMarkers()
-	table.clear(checkpoints)
-end
-
-local function createCheckpoint()
-	if not recording then
-		return
-	end
-
-	local ok, pivot = pcall(function()
-		return character:GetPivot()
-	end)
-
-	if not ok then
-		return
-	end
-
-	local characterCFrame = copyCFrame(pivot)
-
-	if not characterCFrame then
-		return
-	end
-
-	local okVelocity, velocity = pcall(function()
-		return copyVelocity(character.Velocity)
-	end)
-
-	if not okVelocity then
-		velocity = nil
-	end
-
-	checkpoints[#checkpoints + 1] = {
-		frameIndex = #frames,
-		time = recordingTime,
-		character = characterCFrame,
-		velocity = velocity,
-		marker = createCheckpointMarker(characterCFrame)
-	}
-end
-
-local function returnToCheckpoint()
-	local checkpoint = checkpoints[#checkpoints]
-
-	if not checkpoint then
-		return
-	end
-
-	setReplayCharacter(checkpoint.character)
-
-	while #frames > checkpoint.frameIndex do
-		table.remove(frames)
-	end
-
-	recordingTime = checkpoint.time
-	replayTime = 0
-	replayIndex = 1
-
-	if checkpoint.velocity then
-		pcall(function()
-			character.Velocity = copyVelocity(checkpoint.velocity)
-		end)
-	end
-end
-
-local function deleteCheckpoint()
-	if #checkpoints == 0 then
-		return
-	end
-
-	local checkpoint = checkpoints[#checkpoints]
-
-	if checkpoint and checkpoint.marker then
-		pcall(function()
-			checkpoint.marker:Destroy()
-		end)
-	end
-
-	table.remove(checkpoints)
+    recording = false
 end
 
 local function startReplay()
-	if #frames == 0 then
-		return
-	end
+    if #frames == 0 then
+        return
+    end
 
-	recording = false
-	replaying = true
+    recording = false
+    replaying = true
+    paused = false
+    pausedState = nil
 
-	replayTime = 0
-	replayIndex = 1
+    replayTime = 0
+    replayIndex = 1
+    resumeTesting = false
+    syntheticMovement = false
 
-	setReplayCharacter(frames[1].character)
+    updateMarkerVisibility(true)
+
+    setCFrame(frames[1].character)
+
+    savedVelocity = frames[1].velocity or Vector3.zero
+    setVelocity(savedVelocity)
+
+    resetVelocitySamples(getPosition(), savedVelocity)
 end
 
-local function getReplayFrame()
-	if #frames == 0 then
-		return nil
-	end
+local function stopReplay()
+    replaying = false
+    syntheticMovement = false
+    resumeTesting = false
 
-	if replayTime <= frames[1].time then
-		return frames[1]
-	end
-
-	while
-		replayIndex < #frames - 1
-		and replayTime >= frames[replayIndex + 1].time
-	do
-		replayIndex += 1
-	end
-
-	local current = frames[replayIndex]
-	local nextFrame = frames[replayIndex + 1]
-
-	if not nextFrame then
-		return current
-	end
-
-	local duration = nextFrame.time - current.time
-	local alpha = 0
-
-	if duration > 0 then
-		alpha = (replayTime - current.time) / duration
-	end
-
-	alpha = math.max(0, math.min(1, alpha))
-
-	return {
-		character = lerpCFrame(
-			current.character,
-			nextFrame.character,
-			alpha
-		)
-	}
+    updateMarkerVisibility(false)
 end
 
-local function updateReplay(dt)
-	if not replaying then
-		return nil
-	end
+local function placeCheckpoint()
+    local cf = getCFrame()
 
-	replayTime += dt
+    if not cf then
+        return
+    end
 
-	if replayTime >= frames[#frames].time then
-		replayTime = frames[#frames].time
-		setReplayCharacter(frames[#frames].character)
-		replaying = false
+    local checkpoint = {
+        character = cf,
+        velocity = estimatedVelocity,
+        frameIndex = #frames,
+        time = recordingTime,
+        marker = createMarker(cf),
+    }
 
-		return nil
-	end
-
-	return getReplayFrame()
+    table.insert(checkpoints, checkpoint)
 end
+
+local function returnToCheckpoint()
+    if #checkpoints == 0 then
+        return
+    end
+
+    local checkpoint = checkpoints[#checkpoints]
+
+    replaying = false
+    paused = false
+    pausedState = nil
+    resumeTesting = false
+    syntheticMovement = false
+
+    updateMarkerVisibility(false)
+
+    setCharacterState({
+        character = checkpoint.character,
+        velocity = checkpoint.velocity,
+    })
+
+    while #frames > checkpoint.frameIndex do
+        table.remove(frames)
+    end
+
+    recordingTime = checkpoint.time
+    replayTime = 0
+    replayIndex = 1
+
+    resetVelocitySamples(
+        getPosition(),
+        checkpoint.velocity or Vector3.zero
+    )
+
+    savedVelocity = checkpoint.velocity or Vector3.zero
+    setVelocity(savedVelocity)
+end
+
+local function removeCheckpoint()
+    if #checkpoints == 0 then
+        return
+    end
+
+    deleteCheckpoint(#checkpoints)
+end
+
+local function pauseTAS()
+    local cf = getCFrame()
+    local position = getPosition()
+
+    if not cf or not position then
+        return
+    end
+
+    savedVelocity = estimatedVelocity
+
+    pauseCFrame = cf
+    pausedState = {
+        character = cf,
+        velocity = savedVelocity,
+    }
+
+    paused = true
+    resumeTesting = false
+    syntheticMovement = false
+
+    zeroVelocity()
+    resetVelocitySamples(position, savedVelocity)
+end
+
+local function resumeTAS()
+    if not paused then
+        return
+    end
+
+    paused = false
+
+    local state = pausedState
+    pausedState = nil
+
+    if state then
+        setCFrame(state.character)
+        savedVelocity = state.velocity or Vector3.zero
+        setVelocity(savedVelocity)
+    end
+
+    local position = getPosition()
+    resetVelocitySamples(position, savedVelocity)
+
+    if not replaying then
+        resumeTesting = true
+        resumeFrames = 0
+        resumeStartPosition = position
+    else
+        resumeTesting = false
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then
+        return
+    end
+
+    if input.KeyCode == keybinds.pause then
+        if paused then
+            resumeTAS()
+        else
+            pauseTAS()
+        end
+
+        return
+    end
+
+    if paused then
+        return
+    end
+
+    if input.KeyCode == keybinds.togglerecord then
+        if recording then
+            stopRecording()
+        else
+            startRecording()
+        end
+
+    elseif input.KeyCode == keybinds.replay then
+        if replaying then
+            stopReplay()
+        else
+            startReplay()
+        end
+
+    elseif input.KeyCode == keybinds.checkpoint then
+        placeCheckpoint()
+
+    elseif input.KeyCode == keybinds.returntocheckpoint then
+        returnToCheckpoint()
+
+    elseif input.KeyCode == keybinds.deletecheckpoint then
+        removeCheckpoint()
+    end
+end)
 
 RunService.Heartbeat:Connect(function(dt)
-	if recording then
-		recordingTime += dt
-		captureFrame()
-	end
+    if not dt or dt <= 0 then
+        return
+    end
 
-	if replaying then
-		local replayFrame = updateReplay(dt)
+    local position = getPosition()
 
-		if replayFrame and replayFrame.character then
-			setReplayCharacter(replayFrame.character)
-		end
-	end
+    if not position then
+        return
+    end
+
+
+    if paused then
+        if pauseCFrame then
+            setCFrame(pauseCFrame)
+        end
+
+        zeroVelocity()
+        previousPosition = getPosition()
+        return
+    end
+
+    if replaying then
+        replayTime = replayTime + dt
+
+        while replayIndex < #frames
+            and frames[replayIndex + 1].time <= replayTime do
+            replayIndex = replayIndex + 1
+        end
+
+        local frame = frames[replayIndex]
+
+        if frame then
+            setCFrame(frame.character)
+
+            savedVelocity = frame.velocity or Vector3.zero
+            setVelocity(savedVelocity)
+
+            resetVelocitySamples(
+                getPosition(),
+                savedVelocity
+            )
+        end
+
+        if replayIndex >= #frames then
+            stopReplay()
+        end
+
+        return
+    end
+
+    if resumeTesting then
+        resumeFrames = resumeFrames + 1
+
+        local displacement = Vector3.zero
+
+        if resumeStartPosition then
+            displacement = position - resumeStartPosition
+        end
+
+        if displacement.Magnitude >= SETTINGS.MovementThreshold then
+            resumeTesting = false
+            resetVelocitySamples(position, savedVelocity)
+
+        elseif resumeFrames >= SETTINGS.NativeTestFrames then
+            resumeTesting = false
+            syntheticMovement = true
+
+            resetVelocitySamples(position, savedVelocity)
+
+        else
+            setVelocity(savedVelocity)
+            previousPosition = position
+            return
+        end
+    end
+
+    if syntheticMovement then
+        local step = math.min(dt, SETTINGS.MaxDeltaTime)
+        local cf = getCFrame()
+
+        if cf then
+            setCFrame(cf + savedVelocity * step)
+            setVelocity(savedVelocity)
+        end
+
+        previousPosition = getPosition()
+
+        if recording then
+            recordingTime = recordingTime + dt
+
+            local currentCF = getCFrame()
+
+            if currentCF then
+                table.insert(frames, {
+                    time = recordingTime,
+                    character = currentCF,
+                    velocity = savedVelocity,
+                })
+            end
+        end
+
+        return
+    end
+
+    if previousPosition then
+        local step = math.min(dt, SETTINGS.MaxDeltaTime)
+
+        if step > 0 then
+            local displacement = position - previousPosition
+            local measuredVelocity = displacement / step
+
+            addVelocitySample(measuredVelocity)
+        end
+    end
+
+    previousPosition = position
+    savedVelocity = estimatedVelocity
+
+    if recording then
+        recordingTime = recordingTime + dt
+
+        local cf = getCFrame()
+
+        if cf then
+            table.insert(frames, {
+                time = recordingTime,
+                character = cf,
+                velocity = estimatedVelocity,
+            })
+        end
+    end
 end)
 
-UIS.InputBegan:Connect(function(input, gameProcessed)
-	if gameProcessed then
-		return
-	end
+resetVelocitySamples(getPosition())
 
-	if input.KeyCode == keybinds.togglerecord then
-		if recording then
-			stopRecording()
-		else
-			startRecording()
-		end
-
-	elseif input.KeyCode == keybinds.checkpoint then
-		createCheckpoint()
-
-	elseif input.KeyCode == keybinds.returntocheckpoint then
-		returnToCheckpoint()
-
-	elseif input.KeyCode == keybinds.deletecheckpoint then
-		deleteCheckpoint()
-
-	elseif input.KeyCode == keybinds.replay then
-		if replaying then
-			replaying = false
-		else
-			startReplay()
-		end
-	end
-end)
-
-print("yep yep good to go")
+print("tas started")
