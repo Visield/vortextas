@@ -15,3 +15,5 @@ place checkpoint = F
 return to last checkpoint = R
 
 delete last checkpoint = V
+
+pause/unpause = E
