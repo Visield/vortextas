@@ -1,11 +1,13 @@
---bye bye vis text art comment
-
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
-
 local player = game:GetService("Players").LocalPlayer
+
 local character = player.Character
+
+if not character then
+    error("[tas] character not found")
+end
 
 local keybinds = {
     togglerecord = Enum.KeyCode.P,
@@ -44,8 +46,55 @@ local resumeTesting = false
 local resumeFrames = 0
 local resumeStartPosition = nil
 local syntheticMovement = false
-
 local pauseCFrame = nil
+
+local playerGui = player:FindFirstChildOfClass("PlayerGui")
+
+if not playerGui then
+    playerGui = player:WaitForChild("PlayerGui")
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "TASTextGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+local stateLabel = Instance.new("TextLabel")
+stateLabel.Name = "TASInfo"
+stateLabel.AnchorPoint = Vector2.new(0, 1)
+stateLabel.Position = UDim2.new(0, 10, 1, -10)
+stateLabel.Size = UDim2.new(0, 260, 0, 120)
+stateLabel.BackgroundTransparency = 1
+stateLabel.Font = Enum.Font.Mono
+stateLabel.TextSize = 14
+stateLabel.TextColor3 = Color3.new(1, 1, 1)
+stateLabel.TextXAlignment = Enum.TextXAlignment.Left
+stateLabel.TextYAlignment = Enum.TextYAlignment.Bottom
+stateLabel.TextWrapped = false
+stateLabel.Parent = screenGui
+
+local function updateGUI()
+    local state
+
+    if paused then
+        state = "paused (recording)"
+    elseif recording then
+        state = "recording"
+    elseif replaying then
+        state = "replaying"
+    else
+        state = "idle"
+    end
+
+    stateLabel.Text =
+        state .. "\n" ..
+        "P = toggle record\n" ..
+        "R = return to checkpoint\n" ..
+        "V = delete last checkpoint\n" ..
+        "F = create checkpoint\n" ..
+        "E = pause/unpause (when recording)\n" ..
+        "L = replay"
+end
 
 local function getCFrame()
     local ok, cf = pcall(function()
@@ -90,12 +139,10 @@ local function setCFrame(cf)
         return true
     end
 
-    ok = pcall(function()
+    return pcall(function()
         character.Position = cf.Position
         character.Orientation = cf:ToOrientation()
     end)
-
-    return ok
 end
 
 local function setVelocity(velocity)
@@ -130,13 +177,6 @@ local function addVelocitySample(velocity)
     estimatedVelocity = total / #velocitySamples
 end
 
-local function getCharacterState()
-    return {
-        character = getCFrame(),
-        velocity = estimatedVelocity,
-    }
-end
-
 local function setCharacterState(state)
     if not state or not state.character then
         return
@@ -150,7 +190,6 @@ local function setCharacterState(state)
     setVelocity(savedVelocity)
     resetVelocitySamples(getPosition(), savedVelocity)
 end
-
 
 local function createMarker(cf)
     local marker = Instance.new("Part")
@@ -197,8 +236,12 @@ local function startRecording()
 
     recording = true
     replaying = false
+    paused = false
+    pausedState = nil
     syntheticMovement = false
     resumeTesting = false
+
+    updateMarkerVisibility(false)
 
     local cf = getCFrame()
     local position = getPosition()
@@ -212,10 +255,14 @@ local function startRecording()
     end
 
     resetVelocitySamples(position, estimatedVelocity)
+    updateGUI()
 end
 
 local function stopRecording()
     recording = false
+    paused = false
+    pausedState = nil
+    updateGUI()
 end
 
 local function startReplay()
@@ -241,6 +288,7 @@ local function startReplay()
     setVelocity(savedVelocity)
 
     resetVelocitySamples(getPosition(), savedVelocity)
+    updateGUI()
 end
 
 local function stopReplay()
@@ -249,6 +297,7 @@ local function stopReplay()
     resumeTesting = false
 
     updateMarkerVisibility(false)
+    updateGUI()
 end
 
 local function placeCheckpoint()
@@ -258,15 +307,13 @@ local function placeCheckpoint()
         return
     end
 
-    local checkpoint = {
+    table.insert(checkpoints, {
         character = cf,
         velocity = estimatedVelocity,
         frameIndex = #frames,
         time = recordingTime,
         marker = createMarker(cf),
-    }
-
-    table.insert(checkpoints, checkpoint)
+    })
 end
 
 local function returnToCheckpoint()
@@ -304,6 +351,8 @@ local function returnToCheckpoint()
 
     savedVelocity = checkpoint.velocity or Vector3.zero
     setVelocity(savedVelocity)
+
+    updateGUI()
 end
 
 local function removeCheckpoint()
@@ -315,6 +364,10 @@ local function removeCheckpoint()
 end
 
 local function pauseTAS()
+    if not recording or replaying then
+        return
+    end
+
     local cf = getCFrame()
     local position = getPosition()
 
@@ -336,6 +389,7 @@ local function pauseTAS()
 
     zeroVelocity()
     resetVelocitySamples(position, savedVelocity)
+    updateGUI()
 end
 
 local function resumeTAS()
@@ -357,13 +411,11 @@ local function resumeTAS()
     local position = getPosition()
     resetVelocitySamples(position, savedVelocity)
 
-    if not replaying then
-        resumeTesting = true
-        resumeFrames = 0
-        resumeStartPosition = position
-    else
-        resumeTesting = false
-    end
+    resumeTesting = true
+    resumeFrames = 0
+    resumeStartPosition = position
+
+    updateGUI()
 end
 
 UserInputService.InputBegan:Connect(function(input, processed)
@@ -421,7 +473,6 @@ RunService.Heartbeat:Connect(function(dt)
         return
     end
 
-
     if paused then
         if pauseCFrame then
             setCFrame(pauseCFrame)
@@ -477,7 +528,6 @@ RunService.Heartbeat:Connect(function(dt)
         elseif resumeFrames >= SETTINGS.NativeTestFrames then
             resumeTesting = false
             syntheticMovement = true
-
             resetVelocitySamples(position, savedVelocity)
 
         else
@@ -529,6 +579,7 @@ RunService.Heartbeat:Connect(function(dt)
     previousPosition = position
     savedVelocity = estimatedVelocity
 
+
     if recording then
         recordingTime = recordingTime + dt
 
@@ -545,5 +596,4 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 resetVelocitySamples(getPosition())
-
-print("tas started")
+updateGUI()
