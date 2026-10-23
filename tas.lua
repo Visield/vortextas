@@ -3,6 +3,9 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local player = game:GetService("Players").LocalPlayer
 
+-- replace this to import stuff
+local ImportData = nil
+
 local character = player.Character
 
 if not character then
@@ -16,6 +19,7 @@ local keybinds = {
     returntocheckpoint = Enum.KeyCode.R,
     deletecheckpoint = Enum.KeyCode.V,
     pause = Enum.KeyCode.E,
+    export = Enum.KeyCode.O,
 }
 
 local SETTINGS = {
@@ -63,7 +67,7 @@ local stateLabel = Instance.new("TextLabel")
 stateLabel.Name = "TASInfo"
 stateLabel.AnchorPoint = Vector2.new(0, 1)
 stateLabel.Position = UDim2.new(0, 10, 1, -10)
-stateLabel.Size = UDim2.new(0, 260, 0, 120)
+stateLabel.Size = UDim2.new(0, 300, 0, 140)
 stateLabel.BackgroundTransparency = 1
 stateLabel.Font = Enum.Font.Mono
 stateLabel.TextSize = 14
@@ -93,7 +97,8 @@ local function updateGUI()
         "V = delete last checkpoint\n" ..
         "F = create checkpoint\n" ..
         "E = pause/unpause (when recording)\n" ..
-        "L = replay"
+        "L = replay (uses ImportData if set)\n" ..
+        "O = export to console"
 end
 
 local function getCFrame()
@@ -265,7 +270,122 @@ local function stopRecording()
     updateGUI()
 end
 
+local function encodeFrames(sourceFrames)
+    local lines = {"local ImportData = {"}
+
+    for _, frame in ipairs(sourceFrames) do
+        local components = { frame.character:GetComponents() }
+        local velocity = frame.velocity or Vector3.zero
+        local values = {}
+
+        for _, value in ipairs(components) do
+            values[#values + 1] = string.format("%.9g", value)
+        end
+
+        local cfText = table.concat(values, ", ")
+        local velocityText = string.format("%.9g, %.9g, %.9g", velocity.X, velocity.Y, velocity.Z)
+        local timeText = string.format("%.9g", frame.time or 0)
+
+        lines[#lines + 1] = string.format("    {time = %s, cf = {%s}, v = {%s}},", timeText, cfText, velocityText)
+    end
+
+    lines[#lines + 1] = "}"
+    return table.concat(lines, "\n")
+end
+
+local function decodeFrames(data)
+    if type(data) ~= "table" then
+        return nil, "ImportData must be a table."
+    end
+
+    local decoded = {}
+
+    for i, frame in ipairs(data) do
+        if type(frame) ~= "table" or type(frame.time) ~= "number" then
+            return nil, "Frame " .. i .. " has an invalid time or frame table."
+        end
+        if type(frame.cf) ~= "table" or #frame.cf ~= 12 then
+            return nil, "Frame " .. i .. " must have 12 CFrame components in cf."
+        end
+        if type(frame.v) ~= "table" or #frame.v ~= 3 then
+            return nil, "Frame " .. i .. " must have 3 velocity components in v."
+        end
+
+        local components = {}
+        for j = 1, 12 do
+            if type(frame.cf[j]) ~= "number" then
+                return nil, "Frame " .. i .. " has a non-numeric CFrame component."
+            end
+            components[j] = frame.cf[j]
+        end
+        for j = 1, 3 do
+            if type(frame.v[j]) ~= "number" then
+                return nil, "Frame " .. i .. " has a non-numeric velocity component."
+            end
+        end
+
+        decoded[#decoded + 1] = {
+            time = frame.time,
+            character = CFrame.new(table.unpack(components)),
+            velocity = Vector3.new(frame.v[1], frame.v[2], frame.v[3]),
+        }
+    end
+
+    if #decoded == 0 then
+        return nil, "ImportData contains no frames."
+    end
+
+    return decoded
+end
+
+local function importTable()
+    if ImportData == nil then
+        return false
+    end
+
+    local importedFrames, err = decodeFrames(ImportData)
+
+    if not importedFrames then
+        warn("[tas] Import failed: " .. tostring(err))
+        return false
+    end
+
+    frames = importedFrames
+    recordingTime = frames[#frames].time or 0
+    replayTime = 0
+    replayIndex = 1
+    print("[tas] Imported " .. #frames .. " frames from ImportData.")
+    return true
+end
+
+local function exportTAS()
+    if recording then
+        return
+    end
+
+    if #frames == 0 then
+        warn("[tas] Nothing to export.")
+        return
+    end
+
+    local ok, encoded = pcall(function()
+        return encodeFrames(frames)
+    end)
+
+    if not ok then
+        warn("[tas] Export failed: " .. tostring(encoded))
+        return
+    end
+
+    print(encoded)
+end
+
 local function startReplay()
+    if ImportData ~= nil then
+        if not importTable() then
+            return
+        end
+    end
     if #frames == 0 then
         return
     end
@@ -459,6 +579,10 @@ UserInputService.InputBegan:Connect(function(input, processed)
 
     elseif input.KeyCode == keybinds.deletecheckpoint then
         removeCheckpoint()
+    elseif input.KeyCode == keybinds.export then
+        if not recording then
+            exportTAS()
+        end
     end
 end)
 
